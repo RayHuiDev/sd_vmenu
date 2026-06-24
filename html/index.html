@@ -1,0 +1,77 @@
+<!doctype html>
+<html><head><meta charset="utf-8"></head><body>
+<script>
+// v0.4: try new diagnostic port first, then old v0.3 port as fallback.
+const PORTS = [28197, 28196];
+let activePort = null;
+let lastRegister = null;
+let connectedNoticeSent = false;
+let firstSuccess = false;
+
+function nui(name, payload = {}) {
+  return fetch(`https://${GetParentResourceName()}/${name}`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json; charset=UTF-8' },
+    body: JSON.stringify(payload)
+  }).catch(() => null);
+}
+
+async function postToPort(port, path, payload) {
+  const r = await fetch(`http://127.0.0.1:${port}` + path, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json; charset=UTF-8' },
+    body: JSON.stringify(payload || {})
+  });
+  return r.json().catch(() => ({}));
+}
+
+async function getFromPort(port, path) {
+  const r = await fetch(`http://127.0.0.1:${port}` + path);
+  return r.json().catch(() => ({}));
+}
+
+async function registerLoop() {
+  while (true) {
+    if (lastRegister) {
+      let out = null;
+      for (const port of PORTS) {
+        try {
+          out = await postToPort(port, '/register', { ...lastRegister, portTried: port });
+          if (out && out.ok) { activePort = port; break; }
+        } catch (_) {}
+      }
+      if (out && out.ok && !connectedNoticeSent) {
+        connectedNoticeSent = true;
+        firstSuccess = true;
+        nui('sdConnected', { port: activePort });
+      }
+    }
+    await new Promise(r => setTimeout(r, 5000));
+  }
+}
+
+async function pollLoop() {
+  while (true) {
+    try {
+      const port = activePort || PORTS[0];
+      const out = await getFromPort(port, '/poll');
+      if (out && out.ok && out.action) {
+        await nui('sdAction', { action: out.action.action, args: out.action.args || {}, id: out.action.id });
+        try { await postToPort(port, '/ack', { id: out.action.id, ok: true }); } catch (_) {}
+      }
+    } catch (_) {
+      await new Promise(r => setTimeout(r, firstSuccess ? 2000 : 1000));
+    }
+  }
+}
+
+window.addEventListener('message', (event) => {
+  const data = event.data || {};
+  if (data.type !== 'register') return;
+  lastRegister = { type: 'register', ...data };
+});
+
+registerLoop();
+pollLoop();
+</script>
+</body></html>
